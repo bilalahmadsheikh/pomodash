@@ -1,0 +1,28 @@
+# 🔐 Streamlit Secrets
+.streamlit/secrets.toml
+
+# 🐍 Python Bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 📦 Virtual Environment (if used)
+env/
+venv/
+ENV/
+*.egg-info/
+
+# 🗂 OS Generated Files
+.DS_Store
+Thumbs.db
+
+# 🛠 VSCode Settings (optional)
+.vscode/
+
+# 📄 Logs & Local DBs
+*.log
+*.sqlite3
+
+# 🔧 Build Artifacts (if any)
+build/
+dist/
