@@ -3,6 +3,38 @@ from supabase_client import supabase
 from auth import login_register_page
 from timer import pomodoro_ui
 from analytics import show_dashboard
+from datetime import datetime, timedelta, timezone
+
+def refresh_token_if_needed():
+    if "user" not in st.session_state and "refresh_token" in st.session_state:
+        try:
+            result = supabase.auth.refresh_session(st.session_state.refresh_token)
+            session = result.session
+            st.session_state.access_token = session.access_token
+            st.session_state.refresh_token = session.refresh_token
+            st.session_state.token_created_at = datetime.now(timezone.utc)
+            st.session_state.expires_in = session.expires_in
+            st.session_state.user = result.user
+        except Exception as e:
+            st.session_state.clear()
+            st.warning("⚠ Session expired. Please log in again.")
+            st.stop()
+    elif all(k in st.session_state for k in ["refresh_token", "token_created_at", "expires_in"]):
+        expiration_time = st.session_state.token_created_at.replace(tzinfo=timezone.utc) + timedelta(seconds=st.session_state.expires_in)
+        if datetime.now(timezone.utc) > expiration_time:
+            try:
+                result = supabase.auth.refresh_session(st.session_state.refresh_token)
+                session = result.session
+                st.session_state.access_token = session.access_token
+                st.session_state.refresh_token = session.refresh_token
+                st.session_state.token_created_at = datetime.now(timezone.utc)
+                st.session_state.expires_in = session.expires_in
+                st.session_state.user = result.user
+            except Exception as e:
+                st.session_state.clear()
+                st.warning("⚠ Session expired. Please log in again.")
+                st.stop()
+
 
 def main():
     st.set_page_config(page_title="Pomodash", layout="wide")  # Use 'wide' for better responsiveness
@@ -47,10 +79,12 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
+    refresh_token_if_needed()
 
-    if "user" not in st.session_state:
+    if "user" not in st.session_state or st.session_state.user is None:
         login_register_page()
         return
+
 
     # Header with logout
     st.markdown('<div class="responsive-wrapper">', unsafe_allow_html=True)
