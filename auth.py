@@ -1,6 +1,6 @@
 import streamlit as st
 from supabase_client import supabase
-
+from datetime import datetime, timedelta, timezone
 # ------------------ Custom CSS ------------------
 def inject_custom_css():
     st.markdown("""
@@ -42,14 +42,20 @@ def handle_login():
         })
 
         if result.user:
+            session = result.session
             st.session_state.user = result.user
+            st.session_state.access_token = session.access_token
+            st.session_state.refresh_token = session.refresh_token
+            st.session_state.token_created_at = datetime.now(timezone.utc)
+            st.session_state.expires_in = session.expires_in
             st.session_state.login_error = None
             st.experimental_rerun()
+
         else:
             st.session_state.login_error = "No user returned."
 
-    except Exception:
-        st.session_state.login_error = "❌ Login failed. Please check your credentials."
+    except Exception as e:
+        st.session_state.login_error = f"❌ Login failed. {e}"
 
 
 def login():
