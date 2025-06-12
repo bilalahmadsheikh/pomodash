@@ -172,14 +172,39 @@ def restore_timer_from_db():
             data = res.data[0] if res.data else None
 
             if data:
-                # Ensure both datetimes are timezone-aware
                 start_time = datetime.fromisoformat(data["start_time"].replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
                 duration = data["duration_minutes"]
                 phase = data["phase"]
                 elapsed = (now - start_time).total_seconds()
+                remaining = duration * 60 - elapsed
 
-                if elapsed < duration * 60:
+                if remaining <= 0:
+                    if phase == "Work":
+                        st.session_state.partial_work_minutes = duration
+                        st.session_state.phase = "Break"
+                        st.session_state.work_duration = duration
+                        st.session_state.break_duration = 5  # fallback
+                        st.session_state.start_time = time.time()
+                        st.session_state.start_timestamp = datetime.now(timezone.utc)
+                        st.session_state.elapsed = 0
+                        st.session_state.running = True
+                        log_active_timer("Break", st.session_state.break_duration)
+                        st.toast("✅ Work session auto-completed. Break started.")
+                        st.rerun()
+                    else:
+                        st.session_state.partial_break_minutes = duration
+                        log_to_supabase(
+                            work=st.session_state.partial_work_minutes,
+                            rest=st.session_state.partial_break_minutes,
+                            status="Completed"
+                        )
+                        delete_active_timer()
+                        clear_timer_state()
+                        st.toast("✅ Pomodoro session auto-completed.")
+                        st.rerun()
+                else:
+                    # Restore timer if still running
                     st.session_state.work_duration = duration if phase == "Work" else 25
                     st.session_state.break_duration = duration if phase == "Break" else 5
                     st.session_state.phase = phase
@@ -192,6 +217,7 @@ def restore_timer_from_db():
                     st.toast(f"🔁 Restored {phase} session!")
     except Exception as e:
         st.error(f"❌ Timer restore error: {e}")
+
 
 
 
