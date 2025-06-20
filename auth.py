@@ -1,7 +1,7 @@
 import streamlit as st
 from supabase_client import supabase
-from datetime import datetime, timedelta, timezone
-import json
+from datetime import datetime, timezone
+from url_session_manager import save_session_to_url, clear_session_from_url
 
 # ------------------ Custom CSS ------------------
 def inject_custom_css():
@@ -32,32 +32,6 @@ def inject_custom_css():
         </style>
     """, unsafe_allow_html=True)
 
-def save_session_to_storage(session_data):
-    """Save session data to browser's localStorage using JavaScript"""
-    session_json = json.dumps(session_data, default=str)
-    st.components.v1.html(f"""
-    <script>
-        localStorage.setItem('pomodash_session', `{session_json}`);
-        console.log('Session saved to localStorage');
-    </script>
-    """, height=0)
-
-def save_login_session():
-    """Save current login session data to persistent storage"""
-    if "user" in st.session_state:
-        session_data = {
-            'access_token': st.session_state.get('access_token'),
-            'refresh_token': st.session_state.get('refresh_token'),
-            'token_created_at': st.session_state.get('token_created_at').isoformat() if st.session_state.get('token_created_at') else None,
-            'expires_in': st.session_state.get('expires_in'),
-            'user': {
-                'id': st.session_state.user.id,
-                'email': st.session_state.user.email,
-                # Add other user fields you need
-            }
-        }
-        save_session_to_storage(session_data)
-
 # ------------------ Login UI ------------------
 def handle_login():
     email = st.session_state.login_email
@@ -74,22 +48,13 @@ def handle_login():
         })
 
         if result.user and result.session:
-            session = result.session
+            # Save session to URL (this also updates session state)
+            save_session_to_url(result.user, result.session)
             
-            # Store in session state
-            st.session_state.user = result.user
-            st.session_state.access_token = session.access_token
-            st.session_state.refresh_token = session.refresh_token
-            st.session_state.token_created_at = datetime.now(timezone.utc)
-            st.session_state.expires_in = session.expires_in
-            st.session_state.login_error = None
-            
-            # Save to persistent storage
-            save_login_session()
-            
-            # Clear login fields
+            # Clear login fields and errors
             st.session_state.login_email = ""
             st.session_state.login_password = ""
+            st.session_state.login_error = None
             
             st.success("✅ Login successful!")
             st.rerun()
