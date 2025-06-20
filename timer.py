@@ -2,11 +2,17 @@ import streamlit as st
 import time
 from datetime import datetime, timedelta, timezone
 from supabase_client import supabase
-
+from url_session_manager import get_current_user
 
 def pomodoro_ui():
     st.title("⏳ Pomodoro Timer")
     st.markdown("Boost your productivity using the Pomodoro technique!")
+
+    # Ensure we have a valid user
+    current_user = get_current_user()
+    if not current_user:
+        st.error("❌ Authentication required. Please log in again.")
+        return
 
     restore_timer_from_db()
 
@@ -39,6 +45,23 @@ def pomodoro_ui():
 
 
 def run_timer():
+    # Ensure we have a valid user
+    current_user = get_current_user()
+    if not current_user:
+        st.error("❌ Authentication required. Please log in again.")
+        st.session_state.running = False
+        return
+
+    # Initialize session state variables if they don't exist
+    if "paused" not in st.session_state:
+        st.session_state.paused = False
+    if "elapsed" not in st.session_state:
+        st.session_state.elapsed = 0
+    if "partial_work_minutes" not in st.session_state:
+        st.session_state.partial_work_minutes = 0
+    if "partial_break_minutes" not in st.session_state:
+        st.session_state.partial_break_minutes = 0
+
     phase = st.session_state.phase
     duration = st.session_state.work_duration if phase == "Work" else st.session_state.break_duration
     total_time = duration * 60
@@ -98,9 +121,8 @@ def run_timer():
         st.info("⏭ Skipped to Break.")
         st.rerun()
 
-
     if not st.session_state.paused:
-        elapsed = time.time() - st.session_state.start_time + st.session_state.get("elapsed", 0)
+        elapsed = time.time() - st.session_state.start_time + st.session_state.elapsed
         remaining = int(total_time - elapsed)
 
         if remaining <= 0:
@@ -139,8 +161,13 @@ def run_timer():
 
 def log_to_supabase(work, rest, status="Completed"):
     try:
+        current_user = get_current_user()
+        if not current_user:
+            st.error("❌ Authentication required to log session.")
+            return
+            
         supabase.table("sessions").insert({
-            "user_id": st.session_state.user.id,
+            "user_id": current_user.id,
             "work_minutes": work,
             "break_minutes": rest,
             "status": status,
@@ -153,8 +180,13 @@ def log_to_supabase(work, rest, status="Completed"):
 
 def log_active_timer(phase, duration_minutes):
     try:
+        current_user = get_current_user()
+        if not current_user:
+            st.error("❌ Authentication required to store timer.")
+            return
+            
         supabase.table("active_timer").upsert({
-            "user_id": st.session_state.user.id,
+            "user_id": current_user.id,
             "phase": phase,
             "start_time": datetime.now(timezone.utc).isoformat(),
             "duration_minutes": duration_minutes,
@@ -164,66 +196,69 @@ def log_active_timer(phase, duration_minutes):
         st.error(f"❌ Failed to store timer: {e}")
 
 
-
 def restore_timer_from_db():
     try:
-        if "user" in st.session_state and not st.session_state.get("running", False):
-            res = supabase.table("active_timer").select("*").eq("user_id", st.session_state.user.id).limit(1).execute()
-            data = res.data[0] if res.data else None
+        current_user = get_current_user()
+        if not current_user or st.session_state.get("running", False):
+            return
+            
+        res = supabase.table("active_timer").select("*").eq("user_id", current_user.id).limit(1).execute()
+        data = res.data[0] if res.data else None
 
-            if data:
-                start_time = datetime.fromisoformat(data["start_time"].replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
-                duration = data["duration_minutes"]
-                phase = data["phase"]
-                elapsed = (now - start_time).total_seconds()
-                remaining = duration * 60 - elapsed
+        if data:
+            start_time = datetime.fromisoformat(data["start_time"].replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            duration = data["duration_minutes"]
+            phase = data["phase"]
+            elapsed = (now - start_time).total_seconds()
+            remaining = duration * 60 - elapsed
 
-                if remaining <= 0:
-                    if phase == "Work":
-                        st.session_state.partial_work_minutes = duration
-                        st.session_state.phase = "Break"
-                        st.session_state.work_duration = duration
-                        st.session_state.break_duration = 5  # fallback
-                        st.session_state.start_time = time.time()
-                        st.session_state.start_timestamp = datetime.now(timezone.utc)
-                        st.session_state.elapsed = 0
-                        st.session_state.running = True
-                        log_active_timer("Break", st.session_state.break_duration)
-                        st.toast("✅ Work session auto-completed. Break started.")
-                        st.rerun()
-                    else:
-                        st.session_state.partial_break_minutes = duration
-                        log_to_supabase(
-                            work=st.session_state.partial_work_minutes,
-                            rest=st.session_state.partial_break_minutes,
-                            status="Completed"
-                        )
-                        delete_active_timer()
-                        clear_timer_state()
-                        st.toast("✅ Pomodoro session auto-completed.")
-                        st.rerun()
-                else:
-                    # Restore timer if still running
-                    st.session_state.work_duration = duration if phase == "Work" else 25
-                    st.session_state.break_duration = duration if phase == "Break" else 5
-                    st.session_state.phase = phase
-                    st.session_state.start_time = time.time() - elapsed
+            if remaining <= 0:
+                if phase == "Work":
+                    st.session_state.partial_work_minutes = duration
+                    st.session_state.phase = "Break"
+                    st.session_state.work_duration = duration
+                    st.session_state.break_duration = 5  # fallback
+                    st.session_state.start_time = time.time()
+                    st.session_state.start_timestamp = datetime.now(timezone.utc)
                     st.session_state.elapsed = 0
                     st.session_state.running = True
-                    st.session_state.paused = False
-                    st.session_state.partial_work_minutes = 0
-                    st.session_state.partial_break_minutes = 0
-                    st.toast(f"🔁 Restored {phase} session!")
+                    st.session_state.paused = False  # Initialize paused state
+                    log_active_timer("Break", st.session_state.break_duration)
+                    st.toast("✅ Work session auto-completed. Break started.")
+                    st.rerun()
+                else:
+                    st.session_state.partial_break_minutes = duration
+                    log_to_supabase(
+                        work=st.session_state.get("partial_work_minutes", 0),
+                        rest=st.session_state.partial_break_minutes,
+                        status="Completed"
+                    )
+                    delete_active_timer()
+                    clear_timer_state()
+                    st.toast("✅ Pomodoro session auto-completed.")
+                    st.rerun()
+            else:
+                # Restore timer if still running
+                st.session_state.work_duration = duration if phase == "Work" else 25
+                st.session_state.break_duration = duration if phase == "Break" else 5
+                st.session_state.phase = phase
+                st.session_state.start_time = time.time() - elapsed
+                st.session_state.elapsed = 0
+                st.session_state.running = True
+                st.session_state.paused = False  # Initialize paused state
+                st.session_state.partial_work_minutes = 0
+                st.session_state.partial_break_minutes = 0
+                st.toast(f"🔁 Restored {phase} session!")
     except Exception as e:
         st.error(f"❌ Timer restore error: {e}")
 
 
-
-
 def delete_active_timer():
     try:
-        supabase.table("active_timer").delete().eq("user_id", st.session_state.user.id).execute()
+        current_user = get_current_user()
+        if current_user:
+            supabase.table("active_timer").delete().eq("user_id", current_user.id).execute()
     except:
         pass
 
