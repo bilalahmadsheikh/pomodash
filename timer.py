@@ -37,6 +37,7 @@ def pomodoro_ui():
         st.session_state.skip_to_break = False
         st.session_state.partial_work_minutes = 0
         st.session_state.partial_break_minutes = 0
+        st.session_state.session_id = None  # Track session ID for updates
 
         log_active_timer("Work", work_duration, break_duration, work_duration)
         st.rerun()
@@ -64,6 +65,8 @@ def run_timer():
         st.session_state.partial_break_minutes = 0
     if "original_work_duration" not in st.session_state:
         st.session_state.original_work_duration = 25  # Default fallback
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = None
 
     phase = st.session_state.phase
     duration = st.session_state.work_duration if phase == "Work" else st.session_state.break_duration
@@ -92,15 +95,21 @@ def run_timer():
         elapsed_minutes = round(total_elapsed / 60)
 
         if phase == "Work":
-            st.session_state.partial_work_minutes += elapsed_minutes
+            # Log work session immediately
+            session_id = log_work_session(elapsed_minutes)
+            st.session_state.session_id = session_id
         else:
-            st.session_state.partial_break_minutes += elapsed_minutes
+            # Update existing session with break time
+            if st.session_state.session_id:
+                update_session_with_break(st.session_state.session_id, elapsed_minutes)
+            else:
+                # Fallback: create new session
+                log_to_supabase(
+                    work=st.session_state.partial_work_minutes,
+                    rest=elapsed_minutes,
+                    status="Early Stop"
+                )
 
-        log_to_supabase(
-            work=st.session_state.partial_work_minutes,
-            rest=st.session_state.partial_break_minutes,
-            status="Early Stop"
-        )
         delete_active_timer()
         st.warning(f"⛔ Session stopped early. Logged {elapsed_minutes} min of {phase}.")
         clear_timer_state()
@@ -109,15 +118,16 @@ def run_timer():
     if phase == "Work" and col4.button("⏭ Skip to Break"):
         total_elapsed = st.session_state.elapsed + (time.time() - st.session_state.start_time)
         elapsed_minutes = round(total_elapsed / 60)
-        st.session_state.partial_work_minutes += elapsed_minutes
+        
+        # Log work session immediately
+        session_id = log_work_session(elapsed_minutes)
+        st.session_state.session_id = session_id
 
-        # DON'T log here - only accumulate work time for final logging
         st.session_state.phase = "Break"
         st.session_state.start_time = time.time()
         st.session_state.start_timestamp = datetime.now(timezone.utc)
         st.session_state.elapsed = 0
         st.session_state.skip_to_break = True
-        # DON'T reset partial_work_minutes - keep it for final logging
         log_active_timer("Break", st.session_state.break_duration, st.session_state.break_duration, st.session_state.original_work_duration)
         st.info("⏭ Skipped to Break.")
         st.rerun()
@@ -131,7 +141,10 @@ def run_timer():
             elapsed_minutes = round(elapsed / 60)
 
             if phase == "Work":
-                st.session_state.partial_work_minutes += elapsed_minutes
+                # Log work session immediately
+                session_id = log_work_session(elapsed_minutes)
+                st.session_state.session_id = session_id
+                
                 st.session_state.phase = "Break"
                 st.session_state.start_time = time.time()
                 st.session_state.start_timestamp = datetime.now(timezone.utc)
@@ -139,14 +152,18 @@ def run_timer():
                 log_active_timer("Break", st.session_state.break_duration, st.session_state.break_duration, st.session_state.original_work_duration)
                 st.rerun()
             else:
-                # Only log when BOTH work and break are complete
-                st.session_state.partial_break_minutes += elapsed_minutes
+                # Update existing session with break time
+                if st.session_state.session_id:
+                    update_session_with_break(st.session_state.session_id, elapsed_minutes)
+                else:
+                    # Fallback: create new session
+                    log_to_supabase(
+                        work=st.session_state.partial_work_minutes,
+                        rest=elapsed_minutes,
+                        status="Completed"
+                    )
+                
                 st.session_state.running = False
-                log_to_supabase(
-                    work=st.session_state.partial_work_minutes,
-                    rest=st.session_state.partial_break_minutes,
-                    status="Completed"
-                )
                 delete_active_timer()
                 st.balloons()
                 st.success("🎉 Pomodoro Session Complete!")
@@ -161,7 +178,45 @@ def run_timer():
         st.info("⏸ Timer is paused.")
 
 
+def log_work_session(work_minutes):
+    """Log work session immediately and return session ID for later update"""
+    try:
+        current_user = get_current_user()
+        if not current_user:
+            st.error("❌ Authentication required to log session.")
+            return None
+            
+        response = supabase.table("sessions").insert({
+            "user_id": current_user.id,
+            "work_minutes": work_minutes,
+            "break_minutes": 0,  # Will be updated later
+            "status": "Work Completed",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }).execute()
+        
+        session_id = response.data[0]['id'] if response.data else None
+        st.toast(f"✅ Work session logged: {work_minutes} minutes")
+        return session_id
+    except Exception as e:
+        st.error(f"❌ Failed to log work session: {e}")
+        return None
+
+
+def update_session_with_break(session_id, break_minutes):
+    """Update existing session with break time"""
+    try:
+        supabase.table("sessions").update({
+            "break_minutes": break_minutes,
+            "status": "Completed"
+        }).eq("id", session_id).execute()
+        
+        st.toast(f"✅ Session updated with break: {break_minutes} minutes")
+    except Exception as e:
+        st.error(f"❌ Failed to update session with break: {e}")
+
+
 def log_to_supabase(work, rest, status="Completed"):
+    """Fallback logging function for edge cases"""
     try:
         current_user = get_current_user()
         if not current_user:
@@ -187,8 +242,6 @@ def log_active_timer(phase, duration_minutes, break_duration=None, original_work
             st.error("❌ Authentication required to store timer.")
             return
         
-        # Store additional data in a JSON-like format using the break_duration field
-        # Since we can't change the DB, we'll store JSON data in break_duration field
         timer_data = {
             "user_id": current_user.id,
             "phase": phase,
@@ -198,7 +251,6 @@ def log_active_timer(phase, duration_minutes, break_duration=None, original_work
         }
         
         # Store both break_duration and original_work_duration
-        # We'll use a simple encoding: break_duration * 1000 + original_work_duration
         if break_duration is not None and original_work_duration is not None:
             encoded_value = break_duration * 1000 + original_work_duration
             timer_data["break_duration"] = encoded_value
@@ -271,9 +323,11 @@ def restore_timer_from_db():
 
             if remaining <= 0:
                 if phase == "Work":
-                    # Work session completed in background - DON'T log yet, just start break
-                    st.session_state.partial_work_minutes = duration  # Store completed work time
-                    st.session_state.partial_break_minutes = 0
+                    # Work session completed in background - LOG IT IMMEDIATELY
+                    session_id = log_work_session(duration)
+                    
+                    # Start break session
+                    st.session_state.session_id = session_id
                     st.session_state.phase = "Break"
                     st.session_state.work_duration = duration
                     st.session_state.break_duration = stored_break_duration
@@ -284,20 +338,30 @@ def restore_timer_from_db():
                     st.session_state.running = True
                     st.session_state.paused = False
                     log_active_timer("Break", stored_break_duration, stored_break_duration, original_work_duration)
-                    st.toast("✅ Work session auto-completed. Break started.")
+                    st.toast("✅ Work session auto-completed and logged. Break started.")
                     st.rerun()
                 else:
-                    # Break session completed in background - NOW log the complete session
-                    completed_work_minutes = original_work_duration
-                    st.session_state.partial_break_minutes = duration
-                    log_to_supabase(
-                        work=completed_work_minutes,
-                        rest=st.session_state.partial_break_minutes,
-                        status="Completed"
-                    )
+                    # Break session completed in background
+                    # Check if there's a work session to update
+                    if hasattr(st.session_state, 'session_id') and st.session_state.session_id:
+                        update_session_with_break(st.session_state.session_id, duration)
+                    else:
+                        # Need to log complete session - work must have been completed earlier
+                        # Log work session first, then update with break
+                        session_id = log_work_session(original_work_duration)
+                        if session_id:
+                            update_session_with_break(session_id, duration)
+                        else:
+                            # Final fallback
+                            log_to_supabase(
+                                work=original_work_duration,
+                                rest=duration,
+                                status="Completed"
+                            )
+                    
                     delete_active_timer()
                     clear_timer_state()
-                    st.toast("✅ Pomodoro session auto-completed.")
+                    st.toast("✅ Pomodoro session auto-completed and logged.")
                     st.rerun()
             else:
                 # Restore timer if still running
@@ -311,6 +375,7 @@ def restore_timer_from_db():
                 st.session_state.paused = False
                 st.session_state.partial_work_minutes = 0
                 st.session_state.partial_break_minutes = 0
+                st.session_state.session_id = None  # Reset session ID for active timer
                 st.toast(f"🔁 Restored {phase} session!")
     except Exception as e:
         st.error(f"❌ Timer restore error: {e}")
@@ -330,6 +395,6 @@ def clear_timer_state():
         "work_duration", "break_duration", "phase", "start_time",
         "elapsed", "running", "paused", "partial_work_minutes",
         "partial_break_minutes", "skip_to_break", "start_timestamp",
-        "original_work_duration"
+        "original_work_duration", "session_id"
     ]:
         st.session_state.pop(key, None)
